@@ -1,5 +1,7 @@
 package com.genymobile.scrcpy;
 
+import com.genymobile.scrcpy.wrappers.ContentProvider;
+
 import android.graphics.Rect;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -8,7 +10,6 @@ import android.os.Build;
 import java.util.Locale;
 
 public final class Server {
-
 
     private Server() {
         // not instantiable
@@ -98,7 +99,7 @@ public final class Server {
     }
 
     private static Rect parseCrop(String crop) {
-        if ("-".equals(crop)) {
+        if (crop.isEmpty()) {
             return null;
         }
         // input format: "width:height:x:y"
@@ -114,16 +115,6 @@ public final class Server {
     }
 
     private static void suggestFix(Throwable e) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (e instanceof MediaCodec.CodecException) {
-                MediaCodec.CodecException mce = (MediaCodec.CodecException) e;
-                if (mce.getErrorCode() == 0xfffffc0e) {
-                    Ln.e("The hardware encoder is not able to encode at the given definition.");
-                    Ln.e("Try with a lower definition:");
-                    Ln.e("    scrcpy -m 1024");
-                }
-            }
-        }
         if (e instanceof InvalidDisplayIdException) {
             InvalidDisplayIdException idie = (InvalidDisplayIdException) e;
             int[] displayIds = idie.getAvailableDisplayIds();

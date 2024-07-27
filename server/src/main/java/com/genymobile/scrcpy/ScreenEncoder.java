@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.IBinder;
 import android.view.Surface;
 
+import java.io.FileDescriptor;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -24,12 +25,22 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
     private static final int REPEAT_FRAME_DELAY_US = 100_000; // repeat after 100ms
     private static final String KEY_MAX_FPS_TO_ENCODER = "max-fps-to-encoder";
 
-    private static final int NO_PTS = -1;
+    // Keep the values in descending order
+    private static final int[] MAX_SIZE_FALLBACK = {2560, 1920, 1600, 1280, 1024, 800};
+
+    private static final long PACKET_FLAG_CONFIG = 1L << 63;
+    private static final long PACKET_FLAG_KEY_FRAME = 1L << 62;
 
     private final AtomicBoolean streamIsInvalide = new AtomicBoolean();
     private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
     private Thread selectorThread;
 
+    private final String encoderName;
+    private final List<CodecOption> codecOptions;
+    private final int bitRate;
+    private final int maxFps;
+    private final boolean sendFrameMeta;
+    private final boolean downsizeOnError;
     private long ptsOrigin;
     private Device device;
     private Connection connection;
@@ -42,22 +53,16 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
         updateFormat();
     }
 
-    private void updateFormat() {
-        format = createFormat(videoSettings);
-        int maxFps = videoSettings.getMaxFps();
-        if (maxFps > 0) {
-            timeout = 1_000_000 / maxFps;
-        } else {
-            timeout = -1;
-        }
-    }
+    private boolean firstFrameSent;
 
-    public void setConnection(Connection connection) {
-        this.connection = connection;
-    }
-
-    public void setDevice(Device device) {
-        this.device = device;
+    public ScreenEncoder(boolean sendFrameMeta, int bitRate, int maxFps, List<CodecOption> codecOptions, String encoderName,
+            boolean downsizeOnError) {
+        this.sendFrameMeta = sendFrameMeta;
+        this.bitRate = bitRate;
+        this.maxFps = maxFps;
+        this.codecOptions = codecOptions;
+        this.encoderName = encoderName;
+        this.downsizeOnError = downsizeOnError;
     }
 
     @Override
@@ -77,17 +82,13 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
 
     public void streamScreen() throws IOException {
         Workarounds.prepareMainLooper();
-
-        try {
-            internalStreamScreen();
-        } catch (NullPointerException e) {
-            // Retry with workarounds enabled:
-            // <https://github.com/Genymobile/scrcpy/issues/365>
-            // <https://github.com/Genymobile/scrcpy/issues/940>
-            Ln.d("Applying workarounds to avoid NullPointerException");
+        if (Build.BRAND.equalsIgnoreCase("meizu")) {
+            // <https://github.com/Genymobile/scrcpy/issues/240>
+            // <https://github.com/Genymobile/scrcpy/issues/2656>
             Workarounds.fillAppInfo();
-            internalStreamScreen();
         }
+
+        internalStreamScreen();
     }
 
     private void internalStreamScreen() throws IOException {
@@ -106,25 +107,58 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
                 Rect unlockedVideoRect = screenInfo.getUnlockedVideoSize().toRect();
                 int videoRotation = screenInfo.getVideoRotation();
                 int layerStack = device.getLayerStack();
-
                 setSize(format, videoRect.width(), videoRect.height());
-                configure(codec, format);
-                Surface surface = codec.createInputSurface();
-                setDisplaySurface(display, surface, videoRotation, contentRect, unlockedVideoRect, layerStack);
-                codec.start();
+
+                Surface surface = null;
                 try {
+                    configure(codec, format);
+                    surface = codec.createInputSurface();
+                    setDisplaySurface(display, surface, videoRotation, contentRect, unlockedVideoRect, layerStack);
+                    codec.start();
+
                     alive = encode(codec);
                     // do not call stop() on exception, it would trigger an IllegalStateException
                     codec.stop();
+                } catch (IllegalStateException | IllegalArgumentException e) {
+                    Ln.e("Encoding error: " + e.getClass().getName() + ": " + e.getMessage());
+                    if (!downsizeOnError || firstFrameSent) {
+                        // Fail immediately
+                        throw e;
+                    }
+
+                    int newMaxSize = chooseMaxSizeFallback(screenInfo.getVideoSize());
+                    if (newMaxSize == 0) {
+                        // Definitively fail
+                        throw e;
+                    }
+
+                    // Retry with a smaller device size
+                    Ln.i("Retrying with -m" + newMaxSize + "...");
+                    device.setMaxSize(newMaxSize);
+                    alive = true;
                 } finally {
                     destroyDisplay(display);
                     codec.release();
-                    surface.release();
+                    if (surface != null) {
+                        surface.release();
+                    }
                 }
             } while (alive);
         } finally {
             connection.setStreamInvalidateListener(null);
         }
+    }
+
+    private static int chooseMaxSizeFallback(Size failedSize) {
+        int currentMaxSize = Math.max(failedSize.getWidth(), failedSize.getHeight());
+        for (int value : MAX_SIZE_FALLBACK) {
+            if (value < currentMaxSize) {
+                // We found a smaller value to reduce the video size
+                return value;
+            }
+        }
+        // No fallback, fail definitively
+        return 0;
     }
 
     private boolean encode(MediaCodec codec) throws IOException {
@@ -147,6 +181,10 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
                     }
 
                     connection.send(codecBuffer);
+                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        // If this is not a config packet, then it contains a frame
+                        firstFrameSent = true;
+                    }
                 }
             } finally {
                 if (outputBufferId >= 0) {
@@ -163,12 +201,15 @@ public class ScreenEncoder implements Connection.StreamInvalidateListener, Runna
 
         long pts;
         if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-            pts = NO_PTS; // non-media data packet
+            pts = PACKET_FLAG_CONFIG; // non-media data packet
         } else {
             if (ptsOrigin == 0) {
                 ptsOrigin = bufferInfo.presentationTimeUs;
             }
             pts = bufferInfo.presentationTimeUs - ptsOrigin;
+            if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                pts |= PACKET_FLAG_KEY_FRAME;
+            }
         }
 
         headerBuffer.putLong(pts);

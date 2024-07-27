@@ -16,11 +16,17 @@ public class Controller {
 
     private static final int DEFAULT_DEVICE_ID = 0;
 
+    // control_msg.h values of the pointerId field in inject_touch_event message
+    private static final int POINTER_ID_MOUSE = -1;
+    private static final int POINTER_ID_VIRTUAL_MOUSE = -3;
+
     private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor();
 
     private final Device device;
     private final Connection connection;
     private final DeviceMessageSender sender;
+    private final boolean clipboardAutosync;
+    private final boolean powerOn;
 
     private final KeyCharacterMap charMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
 
@@ -31,9 +37,11 @@ public class Controller {
 
     private boolean keepPowerModeOff;
 
-    public Controller(Device device, Connection connection) {
+    public Controller(Device device, Connection connection, boolean clipboardAutosync, boolean powerOn) {
         this.device = device;
         this.connection = connection;
+        this.clipboardAutosync = clipboardAutosync;
+        this.powerOn = powerOn;
         initPointers();
         sender = new DeviceMessageSender(connection);
     }
@@ -49,6 +57,26 @@ public class Controller {
 
             pointerProperties[i] = props;
             pointerCoords[i] = coords;
+        }
+    }
+
+    public void control() throws IOException {
+        // on start, power on the device
+        if (powerOn && !Device.isScreenOn()) {
+            device.pressReleaseKeycode(KeyEvent.KEYCODE_POWER, Device.INJECT_MODE_ASYNC);
+
+            // dirty hack
+            // After POWER is injected, the device is powered on asynchronously.
+            // To turn the device screen off while mirroring, the client will send a message that
+            // would be handled before the device is actually powered on, so its effect would
+            // be "canceled" once the device is turned back on.
+            // Adding this delay prevents to handle the message before the device is actually
+            // powered on.
+            SystemClock.sleep(500);
+        }
+
+        while (true) {
+            handleEvent();
         }
     }
 
@@ -75,7 +103,7 @@ public class Controller {
                 break;
             case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
                 if (device.supportsInputEvents()) {
-                    injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll());
+                    injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
                 }
                 break;
             case ControlMessage.TYPE_BACK_OR_SCREEN_ON:
@@ -104,7 +132,7 @@ public class Controller {
                 }
                 break;
             case ControlMessage.TYPE_SET_CLIPBOARD:
-                setClipboard(msg.getText(), msg.getPaste());
+                setClipboard(msg.getText(), msg.getPaste(), msg.getSequence());
                 break;
             case ControlMessage.TYPE_SET_SCREEN_POWER_MODE:
                 if (device.supportsInputEvents()) {
@@ -128,7 +156,7 @@ public class Controller {
         if (keepPowerModeOff && action == KeyEvent.ACTION_UP && (keycode == KeyEvent.KEYCODE_POWER || keycode == KeyEvent.KEYCODE_WAKEUP)) {
             schedulePowerModeOff();
         }
-        return device.injectKeyEvent(action, keycode, repeat, metaState);
+        return device.injectKeyEvent(action, keycode, repeat, metaState, Device.INJECT_MODE_ASYNC);
     }
 
     private boolean injectChar(char c) {
@@ -139,7 +167,7 @@ public class Controller {
             return false;
         }
         for (KeyEvent event : events) {
-            if (!device.injectEvent(event)) {
+            if (!device.injectEvent(event, Device.INJECT_MODE_ASYNC)) {
                 return false;
             }
         }
@@ -177,7 +205,19 @@ public class Controller {
         pointer.setPressure(pressure);
         pointer.setUp(action == MotionEvent.ACTION_UP);
 
+        int source;
         int pointerCount = pointersState.update(pointerProperties, pointerCoords);
+        if (pointerId == POINTER_ID_MOUSE || pointerId == POINTER_ID_VIRTUAL_MOUSE) {
+            // real mouse event (forced by the client when --forward-on-click)
+            pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+            source = InputDevice.SOURCE_MOUSE;
+        } else {
+            // POINTER_ID_GENERIC_FINGER, POINTER_ID_VIRTUAL_FINGER or real touch from device
+            pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_FINGER;
+            source = InputDevice.SOURCE_TOUCHSCREEN;
+            // Buttons must not be set for touch events
+            buttons = 0;
+        }
 
         if (pointerCount == 1) {
             if (action == MotionEvent.ACTION_DOWN) {
@@ -192,21 +232,13 @@ public class Controller {
             }
         }
 
-        // Right-click and middle-click only work if the source is a mouse
-        boolean nonPrimaryButtonPressed = (buttons & ~MotionEvent.BUTTON_PRIMARY) != 0;
-        int source = nonPrimaryButtonPressed ? InputDevice.SOURCE_MOUSE : InputDevice.SOURCE_TOUCHSCREEN;
-        if (source != InputDevice.SOURCE_MOUSE) {
-            // Buttons must not be set for touch events
-            buttons = 0;
-        }
-
         MotionEvent event = MotionEvent
                 .obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source,
                         0);
-        return device.injectEvent(event);
+        return device.injectEvent(event, Device.INJECT_MODE_ASYNC);
     }
 
-    private boolean injectScroll(Position position, int hScroll, int vScroll) {
+    private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
         long now = SystemClock.uptimeMillis();
         Point point = device.getPhysicalPoint(position);
         if (point == null) {
@@ -224,9 +256,9 @@ public class Controller {
         coords.setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll);
 
         MotionEvent event = MotionEvent
-                .obtain(lastTouchDown, now, MotionEvent.ACTION_SCROLL, 1, pointerProperties, pointerCoords, 0, 0, 1f, 1f, DEFAULT_DEVICE_ID, 0,
+                .obtain(lastTouchDown, now, MotionEvent.ACTION_SCROLL, 1, pointerProperties, pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0,
                         InputDevice.SOURCE_MOUSE, 0);
-        return device.injectEvent(event);
+        return device.injectEvent(event, Device.INJECT_MODE_ASYNC);
     }
 
     /**
@@ -244,7 +276,7 @@ public class Controller {
 
     private boolean pressBackOrTurnScreenOn(int action) {
         if (Device.isScreenOn()) {
-            return device.injectKeyEvent(action, KeyEvent.KEYCODE_BACK, 0, 0);
+            return device.injectKeyEvent(action, KeyEvent.KEYCODE_BACK, 0, 0, Device.INJECT_MODE_ASYNC);
         }
 
         // Screen is off
@@ -257,10 +289,29 @@ public class Controller {
         if (keepPowerModeOff) {
             schedulePowerModeOff();
         }
-        return device.pressReleaseKeycode(KeyEvent.KEYCODE_POWER);
+        return device.pressReleaseKeycode(KeyEvent.KEYCODE_POWER, Device.INJECT_MODE_ASYNC);
     }
 
-    private boolean setClipboard(String text, boolean paste) {
+    private void getClipboard(int copyKey) {
+        // On Android >= 7, press the COPY or CUT key if requested
+        if (copyKey != ControlMessage.COPY_KEY_NONE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && device.supportsInputEvents()) {
+            int key = copyKey == ControlMessage.COPY_KEY_COPY ? KeyEvent.KEYCODE_COPY : KeyEvent.KEYCODE_CUT;
+            // Wait until the event is finished, to ensure that the clipboard text we read just after is the correct one
+            device.pressReleaseKeycode(key, Device.INJECT_MODE_WAIT_FOR_FINISH);
+        }
+
+        // If clipboard autosync is enabled, then the device clipboard is synchronized to the computer clipboard whenever it changes, in
+        // particular when COPY or CUT are injected, so it should not be synchronized twice. On Android < 7, do not synchronize at all rather than
+        // copying an old clipboard content.
+        if (!clipboardAutosync) {
+            String clipboardText = Device.getClipboardText();
+            if (clipboardText != null) {
+                sender.pushClipboardText(clipboardText);
+            }
+        }
+    }
+
+    private boolean setClipboard(String text, boolean paste, long sequence) {
         boolean ok = device.setClipboardText(text);
         if (ok) {
             Ln.i("Device clipboard set");
@@ -268,7 +319,12 @@ public class Controller {
 
         // On Android >= 7, also press the PASTE key if requested
         if (paste && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && device.supportsInputEvents()) {
-            device.pressReleaseKeycode(KeyEvent.KEYCODE_PASTE);
+            device.pressReleaseKeycode(KeyEvent.KEYCODE_PASTE, Device.INJECT_MODE_ASYNC);
+        }
+
+        if (sequence != ControlMessage.SEQUENCE_INVALID) {
+            // Acknowledgement requested
+            sender.pushAckClipboard(sequence);
         }
 
         return ok;

@@ -38,24 +38,30 @@ public final class DesktopConnection extends Connection {
             LocalServerSocket localServerSocket = new LocalServerSocket(SOCKET_NAME);
             try {
                 videoSocket = localServerSocket.accept();
-                // send one byte so the client may read() to detect a connection error
-                videoSocket.getOutputStream().write(0);
-                try {
-                    controlSocket = localServerSocket.accept();
-                } catch (IOException | RuntimeException e) {
-                    videoSocket.close();
-                    throw e;
+                if (sendDummyByte) {
+                    // send one byte so the client may read() to detect a connection error
+                    videoSocket.getOutputStream().write(0);
+                }
+                if (control) {
+                    try {
+                        controlSocket = localServerSocket.accept();
+                    } catch (IOException | RuntimeException e) {
+                        videoSocket.close();
+                        throw e;
+                    }
                 }
             } finally {
                 localServerSocket.close();
             }
         } else {
             videoSocket = connect(SOCKET_NAME);
-            try {
-                controlSocket = connect(SOCKET_NAME);
-            } catch (IOException | RuntimeException e) {
-                videoSocket.close();
-                throw e;
+            if (control) {
+                try {
+                    controlSocket = connect(SOCKET_NAME);
+                } catch (IOException | RuntimeException e) {
+                    videoSocket.close();
+                    throw e;
+                }
             }
         }
 
@@ -77,12 +83,14 @@ public final class DesktopConnection extends Connection {
         videoSocket.shutdownInput();
         videoSocket.shutdownOutput();
         videoSocket.close();
-        controlSocket.shutdownInput();
-        controlSocket.shutdownOutput();
-        controlSocket.close();
+        if (controlSocket != null) {
+            controlSocket.shutdownInput();
+            controlSocket.shutdownOutput();
+            controlSocket.close();
+        }
     }
 
-    private void send(String deviceName, int width, int height) throws IOException {
+    public void sendDeviceMeta(String deviceName, int width, int height) throws IOException {
         byte[] buffer = new byte[DEVICE_NAME_FIELD_LENGTH + 4];
 
         byte[] deviceNameBytes = deviceName.getBytes(StandardCharsets.UTF_8);

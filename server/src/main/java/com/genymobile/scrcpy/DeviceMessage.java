@@ -8,8 +8,13 @@ public abstract class DeviceMessage {
     public static final int MAX_EVENT_SIZE = 4096;
     public static final int TYPE_CLIPBOARD = 0;
     public static final int TYPE_PUSH_RESPONSE = 101;
+    public static final int TYPE_ACK_CLIPBOARD = 1;
+
+    public static final long SEQUENCE_INVALID = ControlMessage.SEQUENCE_INVALID;
 
     private int type;
+    private String text;
+    private long sequence;
 
     private DeviceMessage(int type) {
         this.type = type;
@@ -67,11 +72,22 @@ public abstract class DeviceMessage {
         return new FilePushResponseMessage(id, result);
     }
 
+    public static DeviceMessage createAckClipboard(long sequence) {
+        DeviceMessage event = new DeviceMessage();
+        event.type = TYPE_ACK_CLIPBOARD;
+        event.sequence = sequence;
+        return event;
+    }
+
     public int getType() {
         return type;
     }
     public void writeToByteArray(byte[] array) {
         writeToByteArray(array, 0);
+    }
+
+    public long getSequence() {
+        return sequence;
     }
     public byte[] writeToByteArray(int offset) {
         byte[] temp = new byte[offset + this.getLen()];

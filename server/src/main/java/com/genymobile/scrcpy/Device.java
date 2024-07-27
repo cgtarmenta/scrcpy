@@ -25,6 +25,10 @@ public final class Device {
     public static final int POWER_MODE_OFF = SurfaceControl.POWER_MODE_OFF;
     public static final int POWER_MODE_NORMAL = SurfaceControl.POWER_MODE_NORMAL;
 
+    public static final int INJECT_MODE_ASYNC = InputManager.INJECT_INPUT_EVENT_MODE_ASYNC;
+    public static final int INJECT_MODE_WAIT_FOR_RESULT = InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT;
+    public static final int INJECT_MODE_WAIT_FOR_FINISH = InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH;
+
     public static final int LOCK_VIDEO_ORIENTATION_UNLOCKED = -1;
     public static final int LOCK_VIDEO_ORIENTATION_INITIAL = -2;
 
@@ -37,6 +41,11 @@ public final class Device {
     public interface ClipboardListener {
         void onClipboardTextChanged(String text);
     }
+
+    private final Size deviceSize;
+    private final Rect crop;
+    private int maxSize;
+    private final int lockVideoOrientation;
 
     private ScreenInfo screenInfo;
     private RotationListener rotationListener;
@@ -124,6 +133,11 @@ public final class Device {
         }
     }
 
+    public synchronized void setMaxSize(int newMaxSize) {
+        maxSize = newMaxSize;
+        screenInfo = ScreenInfo.computeScreenInfo(screenInfo.getReverseVideoRotation(), deviceSize, crop, newMaxSize, lockVideoOrientation);
+    }
+
     public synchronized ScreenInfo getScreenInfo() {
         return screenInfo;
     }
@@ -177,7 +191,7 @@ public final class Device {
         return supportsInputEvents;
     }
 
-    public static boolean injectEvent(InputEvent inputEvent, int displayId) {
+    public static boolean injectEvent(InputEvent inputEvent, int displayId, int injectMode) {
         if (!supportsInputEvents(displayId)) {
             throw new AssertionError("Could not inject input event if !supportsInputEvents()");
         }
@@ -186,34 +200,35 @@ public final class Device {
             return false;
         }
 
-        return SERVICE_MANAGER.getInputManager().injectInputEvent(inputEvent, InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+        return ServiceManager.getInputManager().injectInputEvent(inputEvent, injectMode);
     }
 
-    public boolean injectEvent(InputEvent event) {
-        return injectEvent(event, displayId);
+    public boolean injectEvent(InputEvent event, int injectMode) {
+        return injectEvent(event, displayId, injectMode);
     }
 
-    public static boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int displayId) {
+    public static boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int displayId, int injectMode) {
         long now = SystemClock.uptimeMillis();
         KeyEvent event = new KeyEvent(now, now, action, keyCode, repeat, metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
                 InputDevice.SOURCE_KEYBOARD);
-        return injectEvent(event, displayId);
+        return injectEvent(event, displayId, injectMode);
     }
 
-    public boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState) {
-        return injectKeyEvent(action, keyCode, repeat, metaState, displayId);
+    public boolean injectKeyEvent(int action, int keyCode, int repeat, int metaState, int injectMode) {
+        return injectKeyEvent(action, keyCode, repeat, metaState, displayId, injectMode);
     }
 
-    public static boolean pressReleaseKeycode(int keyCode, int displayId) {
-        return injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId) && injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId);
+    public static boolean pressReleaseKeycode(int keyCode, int displayId, int injectMode) {
+        return injectKeyEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0, displayId, injectMode)
+                && injectKeyEvent(KeyEvent.ACTION_UP, keyCode, 0, 0, displayId, injectMode);
     }
 
-    public boolean pressReleaseKeycode(int keyCode) {
-        return pressReleaseKeycode(keyCode, displayId);
+    public boolean pressReleaseKeycode(int keyCode, int injectMode) {
+        return pressReleaseKeycode(keyCode, displayId, injectMode);
     }
 
     public static boolean isScreenOn() {
-        return SERVICE_MANAGER.getPowerManager().isScreenOn();
+        return ServiceManager.getPowerManager().isScreenOn();
     }
 
     public synchronized void setRotationListener(RotationListener rotationListener) {
@@ -225,19 +240,19 @@ public final class Device {
     }
 
     public static void expandNotificationPanel() {
-        SERVICE_MANAGER.getStatusBarManager().expandNotificationsPanel();
+        ServiceManager.getStatusBarManager().expandNotificationsPanel();
     }
 
     public static void expandSettingsPanel() {
-        SERVICE_MANAGER.getStatusBarManager().expandSettingsPanel();
+        ServiceManager.getStatusBarManager().expandSettingsPanel();
     }
 
     public static void collapsePanels() {
-        SERVICE_MANAGER.getStatusBarManager().collapsePanels();
+        ServiceManager.getStatusBarManager().collapsePanels();
     }
 
     public static String getClipboardText() {
-        ClipboardManager clipboardManager = SERVICE_MANAGER.getClipboardManager();
+        ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
         if (clipboardManager == null) {
             return null;
         }
@@ -249,7 +264,7 @@ public final class Device {
     }
 
     public boolean setClipboardText(String text) {
-        ClipboardManager clipboardManager = SERVICE_MANAGER.getClipboardManager();
+        ClipboardManager clipboardManager = ServiceManager.getClipboardManager();
         if (clipboardManager == null) {
             return false;
         }
@@ -301,14 +316,14 @@ public final class Device {
         if (!isScreenOn()) {
             return true;
         }
-        return pressReleaseKeycode(KeyEvent.KEYCODE_POWER, displayId);
+        return pressReleaseKeycode(KeyEvent.KEYCODE_POWER, displayId, Device.INJECT_MODE_ASYNC);
     }
 
     /**
      * Disable auto-rotation (if enabled), set the screen rotation and re-enable auto-rotation (if it was enabled).
      */
     public static void rotateDevice() {
-        WindowManager wm = SERVICE_MANAGER.getWindowManager();
+        WindowManager wm = ServiceManager.getWindowManager();
 
         boolean accelerometerRotation = !wm.isRotationFrozen();
 
