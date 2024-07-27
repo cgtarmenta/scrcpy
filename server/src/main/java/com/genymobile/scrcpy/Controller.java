@@ -45,6 +45,12 @@ public class Controller {
         initPointers();
         sender = new DeviceMessageSender(connection);
     }
+    public Controller(Device device, Connection connection) {
+        this.device = device;
+        this.connection = connection;
+        initPointers();
+        sender = new DeviceMessageSender(connection);
+    }
 
     private void initPointers() {
         for (int i = 0; i < PointersState.MAX_POINTERS; ++i) {

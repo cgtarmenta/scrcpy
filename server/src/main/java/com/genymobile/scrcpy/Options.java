@@ -195,13 +195,6 @@ public class Options {
         this.sendDeviceMeta = sendDeviceMeta;
     }
 
-    public boolean getSendFrameMeta() {
-        return sendFrameMeta;
-    }
-
-    public void setSendFrameMeta(boolean sendFrameMeta) {
-        this.sendFrameMeta = sendFrameMeta;
-    }
 
     public boolean getSendDummyByte() {
         return sendDummyByte;
